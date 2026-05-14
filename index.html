@@ -1006,6 +1006,15 @@ td.refund-val{color:var(--blue)!important}
     <div class="calc-row"><label>조정 후 소득금액 <span class="hint">(사업소득 미리보기)</span></label><span class="val blue" id="d_adjIncome">0원</span></div>
     <div class="calc-row"><label class="sub">조정 후 소득율</label><span class="val blue" style="font-size:13px" id="d_adjRatio">0.0%</span></div>
     <div class="joint-hint" id="joint-adj-hint"><i class="ti ti-users"></i><span>무증빙 경비도 본인 몫(<b id="d_adj_share_pct">50</b>%) 환산 적용 → 조정 후 본인 몫 소득금액 <b id="d_adjIncome_mine">0원</b></span></div>
+
+    <!-- 사업결손금 통산 안내 (§45②, 사업결손 발생 시에만 표시) -->
+    <div id="lossOffsetBox" style="display:none;margin-top:10px;padding:10px 12px;background:#fff3e0;border:1px solid #ffb74d;border-radius:var(--radius);font-size:11.5px;line-height:1.6">
+      <div style="font-weight:700;color:#bf360c;margin-bottom:6px;display:flex;align-items:center;gap:4px">
+        <i class="ti ti-arrow-bar-down"></i>사업결손금 통산 (§45②)
+      </div>
+      <div id="lossOffsetDetail" style="color:#5d4037"></div>
+      <div id="lossOffsetCarry" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dashed #ffb74d;color:#d32f2f;font-weight:600"></div>
+    </div>
   </div>
 
   <div class="section">
@@ -1288,6 +1297,9 @@ td.refund-val{color:var(--blue)!important}
           <td id="r_inc">—</td>
           <td id="ra_inc" class="dim">미적용</td>
         </tr>
+        <tr id="r_lossOffsetRow" style="display:none"><td colspan="3" style="padding:6px 12px;background:#fff3e0;font-size:11px;color:#bf360c;border-radius:0">
+          <div id="r_lossOffsetSummary"></div>
+        </td></tr>
         <!-- 2. 소득공제 계 -->
         <tr><td>② 소득공제 계</td>
           <td id="r_ded">—</td>
@@ -2117,8 +2129,18 @@ function updateDebugInc(){
   const incP=pp('rev')-pp('cogs')-pp('sga')+pp('nonOpInc')-pp('nonOpExp');
   const ec=document.getElementById('ed_inc_curr');
   const ep=document.getElementById('ed_inc_prev');
-  if(ec) ec.textContent=Math.max(0,incC).toLocaleString()+'원';
-  if(ep) ep.textContent=Math.max(0,incP).toLocaleString()+'원';
+  const fmt=(v)=>{
+    if(v<0) return '△'+Math.abs(v).toLocaleString()+'원 (결손)';
+    return v.toLocaleString()+'원';
+  };
+  if(ec){
+    ec.textContent=fmt(incC);
+    ec.style.color=incC<0?'#d32f2f':'';
+  }
+  if(ep){
+    ep.textContent=fmt(incP);
+    ep.style.color=incP<0?'#d32f2f':'';
+  }
 }
 
 /* ══ 파싱값 수동 수정 적용 ══ */
@@ -2728,42 +2750,92 @@ function calc(){
 
   const incomeFull=Math.max(0,rev-cogs-sga+nonOpInc-nonOpExp);
   /* ━━ 소득금액 합산 (소득세법 §45) ━━
-     ① 주사업소득(본인몫) = max(0, incomeFull × shareRatio)
-     ② 추가사업소득 합계 (±, §45① 사업소득 내부 통산)
-     ③ 사업소득 결손 통산: ①+② 음수면 0 (사업소득 결손은 다른 종합소득과 통산 가능하나,
-        본 시뮬은 사업소득 한도 내 처리만 — 정확한 §45① 다른소득 통산은 향후 확장)
-     ④ 이월결손금(§45③): 사업소득 한도 내에서만 공제, 초과분 차기 이월
-     ⑤ 임대소득: max(0, rentalRaw) — 결손 통산 불가(§45②), 별도 합산
-     ⑥ 금융·연금·근로·기타: 각 (음수 불가) 합산  */
-  const mainBizMine=Math.max(0,Math.round(incomeFull*shareRatio));
+     §45① 사업소득 결손금 = 부동산임대업 외 사업소득의 결손금
+     §45② 사업결손금은 ② 근로 → ③ 연금 → ④ 기타 → ⑤ 이자 → ⑥ 배당 순으로 공제
+     §45③ 부동산임대업 결손금은 임대업소득에서만 공제 (다른 소득 통산 불가)
+     §45④ 위에서 공제하고 남은 결손금은 다음 과세기간으로 이월 (15년, 시행령 §101)
+     §45⑤ 이월결손금: 일반사업 이월결손은 사업→근로→연금→기타→이자→배당 순,
+                      임대업 이월결손은 임대업에서만 공제 */
+
+  /* ① 사업소득 통산 (§45①) — 주사업+추가사업, 음수 허용 */
+  const mainBizMine=Math.round(incomeFull*shareRatio); /* 음수 허용 */
   const extraBizSum=getExtraBizSum();
-  const bizCombined=mainBizMine+extraBizSum; /* 사업소득 통산 (음수 가능) */
-  const bizPositive=Math.max(0,bizCombined); /* 사업소득 결손은 0으로 (보수적 처리) */
+  const bizCombined=mainBizMine+extraBizSum; /* 사업소득 통산 결과 (음수 가능) */
+
+  /* ② 이월결손금 사전 처리 (§45⑤) — 사업소득에서 우선 공제
+     bizCombined가 양수일 때만 적용, 한도 내에서만 */
   const carryLoss=getCarryLoss();
-  const carryApplied=Math.min(carryLoss,bizPositive); /* 사업소득 한도 내 공제 */
-  const carryCarryOver=Math.max(0,carryLoss-carryApplied); /* 차기 이월액 */
-  const bizAfterCarry=bizPositive-carryApplied;
-  /* 임대소득 별도 처리 */
-  const rentalInfo=getRentalLossInfo();
-  /* 기타 종합과세 소득 (금융·연금·근로·기타) */
+  const bizForCarry=Math.max(0,bizCombined);
+  const carryApplied=Math.min(carryLoss,bizForCarry);
+  const carryCarryOver=Math.max(0,carryLoss-carryApplied);
+  const bizAfterCarry=bizCombined-carryApplied; /* 이월결손 차감 후 사업소득 (음수 가능) */
+
+  /* ③ 각 소득금액 산출 (양수만, 음수 입력은 0) */
   const finOver=Math.max(0,n('finInc')-20000000);
   const pensIncome=Math.max(0,n('pensionInc')-pensionIncDed(n('pensionInc')));
   const laborIncome=Math.max(0,n('laborInc')-Math.min(laborIncDed(n('laborInc')),20000000));
   const etcIncome=Math.max(0,n('etcInc')*0.4);
-  const otherNonBizSum=finOver+pensIncome+laborIncome+etcIncome;
-  /* 종합소득금액 = 사업소득(이월공제후) + 임대(0이상) + 그외 종합과세 */
-  const income=bizAfterCarry+rentalInfo.applied+otherNonBizSum;
-  /* 기존 호환용 otherIncSum (UI 표시 등에서 참조) */
-  const otherIncSum=extraBizSum+rentalInfo.applied+otherNonBizSum;
+  const rentalInfo=getRentalLossInfo();
+  const rentalIncome=rentalInfo.applied;
+
+  /* ④ 사업결손금 통산 (§45②) — 사업결손이 있으면 순서대로 차감
+     순서: 근로 → 연금 → 기타 → 이자(금융) → 배당(금융과 합산되어 있음) → 임대 X
+     ※ 임대는 §45② 본문에서 통산 대상이 아님 (오히려 임대결손은 통산 불가)
+     ※ 금융소득은 이자+배당 통합으로 입력받으므로 동시 처리 */
+  let bizLoss=Math.max(0,-bizAfterCarry); /* 사업결손금 절댓값 */
+  const offset={labor:0,pension:0,etc:0,fin:0}; /* 각 소득에서 차감된 금액 */
+
+  let bizAfterOffset; /* 통산 후 사업소득 (0 또는 양수) */
+  let laborAfterOffset=laborIncome;
+  let pensAfterOffset=pensIncome;
+  let etcAfterOffset=etcIncome;
+  let finAfterOffset=finOver;
+
+  if(bizLoss>0){
+    /* 근로소득 → 연금 → 기타 → 금융 순 */
+    const cutLabor=Math.min(bizLoss,laborIncome); offset.labor=cutLabor; bizLoss-=cutLabor; laborAfterOffset=laborIncome-cutLabor;
+    if(bizLoss>0){const cutPens=Math.min(bizLoss,pensIncome); offset.pension=cutPens; bizLoss-=cutPens; pensAfterOffset=pensIncome-cutPens;}
+    if(bizLoss>0){const cutEtc=Math.min(bizLoss,etcIncome); offset.etc=cutEtc; bizLoss-=cutEtc; etcAfterOffset=etcIncome-cutEtc;}
+    if(bizLoss>0){const cutFin=Math.min(bizLoss,finOver); offset.fin=cutFin; bizLoss-=cutFin; finAfterOffset=finOver-cutFin;}
+    bizAfterOffset=0; /* 사업소득은 0 (다른 소득과 통산했으므로) */
+  } else {
+    bizAfterOffset=bizAfterCarry; /* 결손 아니면 그대로 */
+  }
+  /* 통산 후에도 남은 결손금 = 차기이월 대상 */
+  const bizLossCarryOver=bizLoss;
+
+  /* ⑤ 종합소득금액 = 통산 후 각 소득 합 */
+  const income=bizAfterOffset+rentalIncome+finAfterOffset+pensAfterOffset+laborAfterOffset+etcAfterOffset;
+  /* 호환용 otherIncSum (UI 표시) */
+  const otherIncSum=extraBizSum+rentalIncome+finAfterOffset+pensAfterOffset+laborAfterOffset+etcAfterOffset;
   lastIncome=income;lastRev=rev*shareRatio;
 
+  /* 통산 정보를 전역에 저장 (UI 렌더링용) */
+  window._lossOffset={
+    bizCombined, bizAfterCarry, bizAfterOffset,
+    carryApplied, carryCarryOver,
+    offset, bizLossCarryOver,
+    hasBizLoss: (bizAfterCarry<0)
+  };
+
   /* 손익계산서 패널: 사업소득(본인몫, 추가사업장·이월결손 전) 표시 */
-  const bizIncomeDisplay=mainBizMine;
+  const bizIncomeDisplay=mainBizMine; /* 주사업소득 본인몫 (음수 가능) */
   const adjNetCalc=n('adj')-n('adjMinus');
-  const preview=Math.max(0,bizIncomeDisplay-Math.round(adjNetCalc*shareRatio));
+  const preview=bizIncomeDisplay-Math.round(adjNetCalc*shareRatio); /* 음수 허용 */
   setDisp('d_income',bizIncomeDisplay);
-  document.getElementById('d_ratio').textContent=pct(bizIncomeDisplay,rev*shareRatio);
   setDisp('d_adjIncome',preview);
+  /* 결손 표시 (빨간색) */
+  const d_incomeEl=document.getElementById('d_income');
+  const d_adjIncomeEl=document.getElementById('d_adjIncome');
+  if(d_incomeEl){
+    d_incomeEl.style.color=bizIncomeDisplay<0?'#d32f2f':'';
+    if(bizIncomeDisplay<0) d_incomeEl.textContent='△'+Math.abs(bizIncomeDisplay).toLocaleString()+'원 (결손)';
+  }
+  if(d_adjIncomeEl){
+    d_adjIncomeEl.style.color=preview<0?'#d32f2f':'';
+    if(preview<0) d_adjIncomeEl.textContent='△'+Math.abs(preview).toLocaleString()+'원 (결손)';
+  }
+  document.getElementById('d_ratio').textContent=pct(bizIncomeDisplay,rev*shareRatio);
   document.getElementById('d_adjRatio').textContent=pct(preview,rev*shareRatio);
 
   /* 타소득 합산 섹션 합계 갱신 (calc 흐름과 동기화) */
@@ -2774,10 +2846,48 @@ function calc(){
   const carryNoteEl=document.getElementById('d_carryLossNote');
   if(carryNoteEl && carryLoss>0){
     let msg='입력 '+carryLoss.toLocaleString()+'원';
-    msg+=' · 사업소득 한도 '+bizPositive.toLocaleString()+'원';
+    msg+=' · 사업소득 한도 '+bizForCarry.toLocaleString()+'원';
     msg+=' → 공제 '+carryApplied.toLocaleString()+'원';
     if(carryCarryOver>0) msg+=' · 차기이월 '+carryCarryOver.toLocaleString()+'원';
     carryNoteEl.textContent=msg;
+  }
+
+  /* 사업결손금 통산 안내박스 (§45②) */
+  const lossBox=document.getElementById('lossOffsetBox');
+  const lossDetail=document.getElementById('lossOffsetDetail');
+  const lossCarry=document.getElementById('lossOffsetCarry');
+  if(lossBox && lossDetail && lossCarry){
+    if(bizAfterCarry<0){
+      const bizLossAmt=Math.abs(bizAfterCarry);
+      lossBox.style.display='';
+      let html='사업결손금 <b style="color:#d32f2f">△'+bizLossAmt.toLocaleString()+'원</b>';
+      html+=' (주사업 '+mainBizMine.toLocaleString();
+      if(extraBizSum!==0) html+=' '+(extraBizSum>=0?'+':'')+extraBizSum.toLocaleString()+' (추가사업)';
+      if(carryApplied>0) html+=' −'+carryApplied.toLocaleString()+' (이월결손)';
+      html+=')';
+      html+='<br><span style="color:#6d4c41">다음 순서로 통산: ';
+      const steps=[];
+      if(offset.labor>0) steps.push('근로 △'+offset.labor.toLocaleString());
+      if(offset.pension>0) steps.push('연금 △'+offset.pension.toLocaleString());
+      if(offset.etc>0) steps.push('기타 △'+offset.etc.toLocaleString());
+      if(offset.fin>0) steps.push('이자·배당 △'+offset.fin.toLocaleString());
+      if(steps.length===0){
+        html+='<i>통산할 다른 소득 없음 → 전액 차기이월</i>';
+      } else {
+        html+=steps.join(' · ');
+      }
+      html+='</span>';
+      lossDetail.innerHTML=html;
+      if(bizLossCarryOver>0){
+        lossCarry.style.display='';
+        lossCarry.innerHTML='⚠ 통산 후 잔여 결손금 <b>△'+bizLossCarryOver.toLocaleString()+'원</b> → '
+          +'<u>다음 과세기간 이월 결손금으로 신고</u> (§45④, 15년간 이월공제)';
+      } else {
+        lossCarry.style.display='none';
+      }
+    } else {
+      lossBox.style.display='none';
+    }
   }
 
   /* 공동사업 안내 박스 갱신 */
@@ -2854,10 +2964,9 @@ function calc(){
   /* 기본 계산 */
   /* 중특감면 (조특법 §7①):
      감면세액 = 산출세액 × (감면대상사업소득 / 종합소득금액) × 감면율
-     분자 = 사업소득(추가사업장 통산 + 이월결손금 공제 후) — 임대 미포함
-     분모 = 종합소득금액 전체 (임대·금융·근로·기타 포함)
-     → 임대소득·기타 종합과세 소득이 있으면 분모↑, bizRatio↓, 감면세액 자동 축소 */
-  const bizIncomeOnly=bizAfterCarry;
+     분자 = 사업소득(통산·이월결손 공제 후, 음수면 0) — 임대 미포함
+     분모 = 종합소득금액 전체 */
+  const bizIncomeOnly=Math.max(0,bizAfterOffset);
   const bizRatio=income>0?Math.min(1,bizIncomeOnly/income):1;
   /* 근로소득세액공제 파라미터 */
   const laborGrossAmt=n('laborInc');
@@ -2884,6 +2993,22 @@ function calc(){
   const lcEl=document.getElementById('d_laborCredit');
   if(lcEl) lcEl.textContent=B.laborCreditAmt?Math.round(B.laborCreditAmt).toLocaleString()+'원':'0원';
   s('r_inc',income);s('r_ded',B.totalDed);s('r_base',B.taxBase);
+  /* 결과표: 결손통산 요약 행 (사업결손 발생 시에만) */
+  const rLossRow=document.getElementById('r_lossOffsetRow');
+  const rLossSum=document.getElementById('r_lossOffsetSummary');
+  if(rLossRow && rLossSum){
+    if(bizAfterCarry<0){
+      rLossRow.style.display='';
+      const bizLossAmt=Math.abs(bizAfterCarry);
+      const totalOffset=offset.labor+offset.pension+offset.etc+offset.fin;
+      let txt='사업결손 △'+bizLossAmt.toLocaleString()+'원';
+      if(totalOffset>0) txt+=' → 타소득 통산 '+totalOffset.toLocaleString()+'원 (§45②)';
+      if(bizLossCarryOver>0) txt+=' · <b>차기이월 '+bizLossCarryOver.toLocaleString()+'원</b>';
+      rLossSum.innerHTML=txt;
+    } else {
+      rLossRow.style.display='none';
+    }
+  }
   s('r_tax',B.rawTax);s('r_sme',B.smeDed);
   /* ⑥ 세액공제 (위하고처럼 합계로 표시): 통합고용 + 기타(연금·표준·othC) */
   const otherCredit=B.totalCredit-B.empCApplied; // 통합고용 제외 (연금·표준·기타)
